@@ -1,0 +1,572 @@
+---
+title: "Titanic Survival Prediction"
+author: "Doudou Shi,Yue Shang"
+date: "2021/6/18"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,message=F}
+library(tidyverse)
+library(tidymodels) 
+library(VIM) 
+library(rsample)
+library(vip)
+library(yardstick)
+```
+
+**Question:**    
+**1. Which variable has the greatest impact on survival rate?**    
+**2. In each variable, which stage/part has a higher survival rate?**   
+**3. Which model can predict the survival rate more accurately?**  
+
+# 1. Load Data
+```{r,message=F}
+test <- read_csv("test.csv")
+train <- read_csv("train.csv")
+```
+
+# 2. Data preprocessing
+```{r,message=FALSE}
+data <- bind_rows(train,test) # Combine the two data sets  
+str(data)
+```
+
+```{r} 
+data[data[1:nrow(data), ] == ""] <- NA
+ 
+aggr(data,plot=FALSE)#View which variables have missing values
+```
+
+```{r}
+# pre Fare NA
+data[which(is.na(data$Fare)),]#1044
+
+data %>% 
+  filter( Pclass==3 & Embarked=="S"&!is.na(Fare)) %>% 
+  select(Fare) %>%  
+  mutate(median=median(Fare))#The median Fare of passengers who meet the two conditions of Pclass=3 and Embarked=S is 8.05
+
+data[1044,"Fare"]  <- 8.05
+```
+
+```{r}
+# pre Embarked NA
+data[which(is.na(data$Embarked)),]# 62 and 830
+
+data %>% 
+  filter( Pclass==1 ) %>% 
+  select(Embarked,Fare) %>% 
+  group_by(Embarked) %>% 
+  summarize(median=median(Fare)) %>% 
+  arrange(median)# when Embarked=c, the Fare is the most close.
+
+data[c(62,830),"Embarked"] <-  "C"
+```
+
+```{r}
+# pre Age NA 
+data_Age <- data[-which(is.na(data$Age)),]
+data_No_Age <- data[which(is.na(data$Age)),]
+
+lm_age <- lm(Age~Pclass+Sex+SibSp+Parch+Fare+Embarked,data = data_Age)
+Age_predict <- predict(lm_age,newdata = data_No_Age)
+data[which(is.na(data$Age)),"Age"] <-  round(Age_predict,0 ) 
+```
+
+```{r} 
+#Extract each person's title
+data$Title<-gsub('(.*, )|(\\..*)','',data$Name)
+
+data$Title[data$Title %in% c("Mlle", "Ms")] <- "Miss"
+data$Title[data$Title== "Mme"] <- "Mrs"
+ 
+data$Title[data$Title!="Miss"&
+           data$Title!="Mrs"&
+           data$Title!="Mr"&
+           data$Title!="Master"] <- "Officer"#People with higher status or higher education
+
+data$Title <- as.factor(data$Title) 
+table(data$Sex,data$Title)
+```
+
+```{r}
+#remove useless col
+data_NSNA <- data[-which(is.na(data$Survived)),]
+data_NSNA %>% 
+select(-PassengerId,-Name,-Cabin,-Ticket) %>% 
+  mutate(Survived=as.factor(Survived),
+         Sex=as.factor(Sex),
+         Pclass=as.factor(Pclass),
+         Embarked=as.factor(Embarked))  ->data_final 
+```
+
+# 3.Exploratory analysis
+
+```{r} 
+set.seed(1234)
+Titanic_split<-initial_split(data_final)
+Titanic_split
+Titanic_train<-training(Titanic_split)
+Titanic_test<-testing(Titanic_split)
+```
+
+## a. Random forest  
+
+```{r}
+rand_forest_spec <-
+  rand_forest() %>%
+  set_engine('ranger',importance = "impurity") %>%
+  set_mode('classification')
+```
+
+```{r}
+set.seed(1234)
+ft_fit <- fit(
+  rand_forest_spec, 
+Survived ~ .,
+  data = Titanic_train
+)
+ft_fit
+```
+ 
+```{r} 
+vip(ft_fit,num_features = 8)
+```
+\
+According to the random forest, we can see that “gender” has the greatest impact on survival, and the least impact is “Embarked”, where people board the boat.  
+
+## b.Different variables on survival rates  
+
+### Sex  
+
+```{r}
+#sex
+Titanic_train %>% 
+ggplot(aes(x = Sex, y = ..count.., fill=Survived)) + 
+  geom_bar(stat = "count", position='dodge') + 
+  xlab('Sex') + 
+  ylab('Count') + 
+  ggtitle('How Sex impact survivor') +  
+  geom_text(stat = "count", aes(label = ..count..),     position=position_dodge(width=1),vjust= -0.11) + 
+  theme(plot.title = element_text(hjust = 0.5), legend.position="bottom")
+
+```
+\
+The mortality rate of men is significantly higher than that of women.\
+
+### Fare
+```{r}
+
+Titanic_train %>% 
+ggplot( ) + 
+  geom_boxplot(aes(y = Fare, fill=Survived)) + 
+  ylab('Fare') +  
+  ggtitle('How Fare impact survivor') +
+  geom_hline(aes(yintercept=28),color='red',linetype='dashed',lwd=1.5 )+
+  theme_bw()
+```
+\
+Those who can pay higher ferry tickets have a higher survival rate\
+
+### Title
+```{r}
+Titanic_train %>% 
+  group_by(Title,Survived) %>% 
+  count() %>% 
+   group_by(Title) %>% 
+  mutate(sum_n=sum(n)) %>% 
+  mutate(ratio=n/sum(n)) %>% 
+  filter(Survived==0) %>% 
+  arrange(ratio)->Title_ratio 
+Title_ratio
+
+ggplot( ) + 
+  geom_bar(data=Titanic_train,aes(x = Title, y = ..count..,
+                                  fill=Survived),
+           stat = "count", position='dodge') +
+  xlab('Title') + 
+  ylab('Count') + 
+  ggtitle('How Sex impact survivor') +  
+  geom_text(stat = "count", aes(label = ..count..),
+            position=position_dodge(width=1),vjust= -0.11) +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position="bottom") 
+
+ 
+```
+\
+From the classification of titles, we can still see that men have the lowest survival rate, while women have the highest survival rate. At the same time, the survival rate of those with higher status has not improved significantly.\
+
+### Age
+```{r}
+tbl_age<-Titanic_train %>%  
+  select(Age,Survived) %>%
+  group_by(Survived) %>%
+  summarise(mean.age=mean(Age,na.rm=TRUE))
+tbl_age
+```
+
+```{r,warning=F}
+Titanic_train %>% 
+ggplot( aes(Age,fill= Survived ))+
+  geom_histogram(aes(y=..density..),alpha=0.5 )+ 
+  geom_density(alpha= 0.3,aes(colour=Survived))+ 
+  scale_fill_brewer(palette = "Set1")+
+  scale_y_continuous(labels = percent)+
+  ylab("density")+
+  ggtitle("survival rate by age")+ 
+  theme_minimal() 
+```
+ \
+ The largest proportion of survivors aged 18-40.\
+ 
+
+### Pclass
+```{r} 
+Titanic_train %>% 
+ggplot(aes(x = Pclass, y = ..count.., fill=Survived)) + 
+  geom_bar(stat = "count", position='dodge') + 
+  xlab('Pclass') + 
+  ylab('Count') + 
+  ggtitle('How Pclass impact survivor') +  
+  geom_text(stat = "count", aes(label = ..count..),
+            position=position_dodge(width=1),vjust= -0.11) + 
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position="bottom")
+
+```
+\
+As the cabin level is higher, the survival rate is higher.\
+
+### Parch & SibSp
+```{r} 
+# Parch
+Titanic_train %>% 
+ggplot(aes(x = Parch, y = ..count.., fill=Survived)) + 
+  geom_bar(stat = "count", position='dodge') + 
+  xlab('Parch') + 
+  ylab('Count') + 
+  ggtitle('How Parch impact survivor') +  
+  geom_text(stat = "count", aes(label = ..count..),
+            position=position_dodge(width=1),vjust= -0.11) + 
+  theme(plot.title = element_text(hjust = 0.5), 
+        legend.position="bottom") ->a1
+
+
+# SibSp
+Titanic_train %>% 
+ggplot(aes(x = SibSp, y = ..count.., fill=Survived)) + 
+  geom_bar(stat = "count", position='dodge') + 
+  xlab('SibSp') + 
+  ylab('Count') + 
+  ggtitle('How SibSp impact survivor') +  
+  geom_text(stat = "count", aes(label = ..count..),
+            position=position_dodge(width=1),vjust= -0.11) + 
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position="bottom") ->a2
+
+
+grid.arrange(a1,a2, nrow=1)
+
+```
+\
+The number of family members does not seem to have much to do with survival rates.\
+
+### Embarked
+```{r} 
+Titanic_train %>% 
+ggplot(aes(x = Embarked, y = ..count.., fill=Survived)) + 
+  geom_bar(stat = "count", position='dodge') + 
+  xlab('Embarked') + 
+  ylab('Count') + 
+  ggtitle('How Embarked impact survivor') +  
+  geom_text(stat = "count", aes(label = ..count..),
+            position=position_dodge(width=1),vjust= -0.11) + 
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.position="bottom")
+
+```
+
+\
+This picture is very similar to the cabin class pair, so there may be a problem of collinearity between the two.\
+
+
+# 4. Modeling prediction  
+
+## a.Random forest  
+Through the VIP () function of the random forest before, we tried to remove the relatively unimportant variables, but found no obvious influence when measuring the accuracy, so full model was used here.  
+```{r}
+rf_spec<-
+  rand_forest(mtry = 1) %>% 
+  set_engine("ranger",importance="impurity") %>% 
+  set_mode("classification")
+```
+
+```{r}
+set.seed(1234)
+rf_fit<-fit(
+  rf_spec,
+  Survived~.,
+  data = Titanic_train
+)
+```
+
+```{r}
+augment(rf_fit,new_data = Titanic_train) %>% 
+  accuracy(truth=Survived,estimate=.pred_class)
+```
+From the output, we find that the accuracy of logistic regression model is 0.865, which is good for predicting model. 
+
+```{r}
+augment(rf_fit,new_data = Titanic_test) %>% 
+  accuracy(truth=Survived,estimate=.pred_class)
+```
+In test data set,the accuracy of the model prediction is also relatively high, which is good.  
+
+## b.Logistic regression  
+```{r}
+library(parsnip)
+lm_spec<-logistic_reg() %>% 
+  set_engine("glm") %>% 
+  set_mode("classification")  
+titanic_model<-Survived~Age+Pclass+Sex+SibSp+Parch+Fare+Embarked+Title
+lm_fit<-fit(lm_spec,titanic_model,data = Titanic_train)
+```
+
+```{r}
+summary(lm_fit$fit)
+```
+
+```{r}
+res<-augment(lm_fit,new_data = Titanic_train)
+res %>% 
+  conf_mat(estimate=.pred_class,truth=Survived) %>% 
+  autoplot(type='heatmap')
+```
+From the output, the precision is 77.5%,which describes 77.5% of the survival results predicted by the binary classifier actually survive.  
+The recall is 70% true lives in the test set are picked out by the binary classifier.  
+
+```{r}
+bind_cols(
+  res,
+ Titanic_train) %>%
+  accuracy(truth =Titanic_train$Survived,estimate = .pred_class)
+```
+
+From the output, we find that the accuracy of logistic regression model is 0.807, which is good for predicting model.  
+
+```{r}
+predict(lm_fit,new_data = Titanic_test)
+```
+
+```{r}
+preds<-augment(lm_fit,new_data = Titanic_test)
+```
+
+```{r}
+preds %>% 
+  conf_mat(estimate=.pred_class,truth=Survived) %>% 
+  autoplot(type='heatmap')
+```
+
+From the output, the precision is 79%,which describes how many of the survival results predicted by the binary classifier actually survive.  
+The recall is 73% which means 73% true lives in the test set are picked out by the binary classifier.  
+
+```{r}
+bind_cols(
+  preds,
+ Titanic_test) %>%
+  accuracy(truth =Titanic_test$Survived,estimate = .pred_class)
+```
+In test data set,the accuracy of the model prediction is also relatively high, which is good.  
+
+## c.Ridge regression  
+```{r}
+ridge_spec<-logistic_reg(mixture = 0,penalty = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("glmnet")
+
+ridge_rec<-recipe(Survived~.,data=Titanic_train) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+ridge_wf<-workflow() %>%
+  add_model(ridge_spec) %>%
+  add_recipe(ridge_rec)
+
+set.seed(1234)
+titanic_fold<-vfold_cv(Titanic_train)
+```
+
+```{r}
+penalty_grid<-grid_regular(penalty(range =c(-10,5)),levels=50)
+```
+
+```{r,message=FALSE}
+tune_res<-tune_grid(
+  object = ridge_wf,
+  resamples=titanic_fold,
+  grid = penalty_grid,control = control_grid(verbose =TRUE)
+  )
+ tune_res %>%
+  collect_metrics() 
+```
+
+```{r}
+tune_res %>% 
+  show_best()
+```
+
+```{r}
+tune_res %>% 
+  autoplot()
+```
+From the output, we can see the accuracy and roc_auc is flat at first, then suddenly it drops sharply, then flat again.
+
+```{r}
+best <- select_best(tune_res,"roc_auc")
+best
+```
+
+```{r}
+ridge_final <- finalize_workflow(ridge_wf, best)
+```
+ 
+```{r}
+ridge_final_fit <- fit(ridge_final,data=Titanic_train)
+```
+
+```{r}
+ augment(ridge_final_fit,new_data = Titanic_train) %>% 
+  accuracy(truth=Survived,estimate=.pred_class)
+```
+
+From the output, we find that the accuracy of ridge regression model is 0.81, which is good for predicting model.  
+
+```{r}
+ augment(ridge_final_fit,new_data = Titanic_test) %>% 
+  accuracy(truth=Survived,estimate=.pred_class)
+```
+In test data set,the accuracy of the model prediction is 0.838565, which is good.  
+
+## d.Decision tree  
+```{r}
+decision_tree_rpart_spec<-
+  decision_tree(
+    cost_complexity = tune(),
+    tree_depth = tune()
+  ) %>% 
+  set_engine("rpart") %>% 
+  set_mode("classification")
+```
+
+```{r}
+#install.packages("rpart.plot")
+library(rpart.plot)
+set.seed(1234)
+Titanic_train2<-Titanic_train
+Titanic_train2$Pclass<-as.integer(Titanic_train2$Pclass)
+Model_DT<-rpart(Survived~Sex+Pclass+Parch,data=Titanic_train2,method="class")
+rpart.plot(Model_DT,extra=3,fallen.leaves=T)
+```
+
+-The relationship between survival rate and Sex: the survival rate of female is more than male.  
+-The relationship between survival rate and PCLASS: the higher the PCLASS level (1 is the highest), the higher the survival rate.  
+-The relationship between survival and Parent and children: Survival rates were higher when traveling more parents and children.  
+
+```{r}
+set.seed(1234)
+dt_fold<-vfold_cv(Titanic_train)
+```
+
+```{r}
+dt_penalty_grid<- grid_regular(cost_complexity(),
+                          tree_depth(),
+                          levels = 5)
+```
+
+```{r,message=FALSE}
+set.seed(1234)
+
+dt_wf <- workflow() %>%
+  add_model(decision_tree_rpart_spec) %>%
+  add_formula(Survived~.)
+
+dt_res <- 
+  dt_wf %>% 
+  tune_grid(
+    resamples = dt_fold,
+    grid = dt_penalty_grid
+    )
+
+dt_res
+```
+
+```{r}
+dt_res %>% 
+  collect_metrics()
+```
+
+```{r}
+dt_res %>%
+  collect_metrics() %>%
+  mutate(tree_depth = factor(tree_depth)) %>%
+  ggplot(aes(cost_complexity, mean, color = tree_depth)) +
+  geom_line(size = 1.5, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ .metric, scales = "free", nrow = 2) +
+  scale_x_log10(labels = scales::label_number()) +
+  scale_color_viridis_d(option = "plasma", begin = .9, end = 0)
+```
+From the plot,it can be seen that with the increase of depth, the regression tree will gradually evolve from a sampling classification problem to a curve fitting problem, but the increase of depth will also intensify the generation of overfitting(after depth=8). That is, the regression tree is very accurate in fitting the training data, but the generalization ability will be reduced.  
+
+```{r}
+dt_res %>% 
+  show_best(metric = "roc_auc")
+```
+
+```{r}
+best_tree <- dt_res %>%
+  select_best("roc_auc")
+```
+
+```{r}
+final_wf <- 
+  dt_wf%>% 
+  finalize_workflow(best_tree)
+final_wf
+```
+
+```{r}
+decision_tree_rpart_spec1<-
+  decision_tree() %>% 
+  set_engine("rpart") %>% 
+  set_mode("classification")
+```
+
+```{r}
+dt_fit<-fit(decision_tree_rpart_spec1,Survived~.,data=Titanic_train)
+```
+
+```{r}
+augment(dt_fit,new_data = Titanic_train) %>% 
+  accuracy(truth=Survived,estimate=.pred_class)
+```
+
+```{r}
+augment(dt_fit,new_data = Titanic_test) %>% 
+  accuracy(truth=Survived,estimate=.pred_class)
+```
+
+# 5.Conclusion  
+1.Variable "Sex" has the greatest impact on survival rate.   
+2.Young women who can pay higher fares are more likely to survive.  
+3.The model that works best is currently a random forest.The accuracy of logistic regression,ridge regression and decision in Titanic survival prediction model is almost the same and less than random forest.  
+
+For this case, we prefer to use random forest, because first of all, it can show which features are more important, the model generalization ability is strong, the training speed is fast and the implementation is relatively simple. For unbalanced data sets, it can balance out errors. If a significant portion of the feature is missing, accuracy can still be maintained.   
